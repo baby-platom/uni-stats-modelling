@@ -119,6 +119,7 @@ p1 <- ggplot(coffee, aes(x = time_of_day, y = money)) +
 
 
 ggsave("plots/box_money_time_weekend.png", p1, width = 9, height = 5, dpi = 150)
+cat('Saved: plots/box_money_time_weekend.png\n')
 
 # 3.3 Visualization 2: Heatmap of counts coffee_name x time_of_day
 N_TOP <- 8
@@ -148,6 +149,7 @@ p2 <- ggplot(heat_dat, aes(x = time_of_day, y = coffee_simple, fill = n)) +
 
 
 ggsave("plots/heat_counts_coffee_time.png", p2, width = 9, height = 5, dpi = 150)
+cat('Saved: plots/heat_counts_coffee_time.png\n')
 
 #############################################
 # 4) Inferential analysis
@@ -158,9 +160,38 @@ fmt_p <- function(p) ifelse(p < 0.001, "< 0.001", sprintf("= %.3f", p))
 # 4.1 Two-way ANOVA
 anova_data <- subset(coffee, !is.na(money) & !is.na(time_of_day) & !is.na(weekend))
 
+# 4.2 Estimated cell means with 95% CI plot
+cell_stats <- aggregate(money ~ time_of_day + weekend, data = anova_data,
+                        function(z) c(mean = mean(z), sd = sd(z), n = length(z)))
+cell_stats <- do.call(data.frame, cell_stats)
+colnames(cell_stats) <- c("time_of_day","weekend","mean","sd","n")
+cell_stats$se <- cell_stats$sd / sqrt(cell_stats$n)
+cell_stats$ci_half <- qt(0.975, df = pmax(cell_stats$n - 1, 1)) * cell_stats$se
+cell_stats$ci_lo <- cell_stats$mean - cell_stats$ci_half
+cell_stats$ci_hi <- cell_stats$mean + cell_stats$ci_half
+
+dodge <- position_dodge(width = 0.4)
+
+p_anova <- ggplot(
+  cell_stats,
+  aes(x = time_of_day, y = mean,
+      group = weekend, color = weekend, shape = weekend, linetype = weekend)
+) +
+  geom_line(position = dodge, linewidth = 0.8) +
+  geom_point(position = dodge, size = 2.8) +
+  geom_errorbar(aes(ymin = ci_lo, ymax = ci_hi), position = dodge, width = 0) +
+  labs(
+    title = "Estimated means (95% CI): money ~ time_of_day * weekend",
+    x = "Time of day", y = "Mean money"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "right")
+
+ggsave("plots/anova_cell_means.png", p_anova, width = 9, height = 5, dpi = 150)
+cat('Saved: plots/anova_cell_means.png\n')
+
 anova_fit <- aov(money ~ time_of_day * weekend, data = anova_data)
 cat("\n===== Standard Two-way ANOVA: money ~ time_of_day * weekend =====\n"); print(summary(anova_fit))
-
 
 res <- residuals(anova_fit)
 res_shapiro <- try({
@@ -197,6 +228,7 @@ p_qq <- ggplot(qq_df, aes(sample = std_res)) +
   theme_minimal(base_size = 12)
 
 ggsave("plots/anova_residuals_qq.png", p_qq, width = 7, height = 5, dpi = 150)
+cat('Saved: plots/anova_residuals_qq.png\n')
 
 # Residuals vs fitted
 rf_df <- data.frame(fit = fit, std_res = std_res)
@@ -208,16 +240,17 @@ p_rv <- ggplot(rf_df, aes(x = fit, y = std_res)) +
   theme_minimal(base_size = 12)
 
 ggsave("plots/anova_residuals_vs_fitted.png", p_rv, width = 7, height = 5, dpi = 150)
+cat('Saved: plots/anova_residuals_vs_fitted.png\n')
 
-# 4.2 Welch-type tests + permutation for interaction if Levene significant
+# 4.3 Welch-type tests + permutation for interaction if Levene significant
 cat("\n===== Variance heterogeneity handling =====\n")
 if (!is.na(lev$p) && lev$p < 0.05) {
   cat("Levene significant -> Using Welch-type tests for main effects and a permutation test for interaction.\n")
-  # Welch one-way for time_of_day (handles unequal variances across dayparts)
+  # Welch one-way for time_of_day
   welch_time <- oneway.test(money ~ time_of_day, data = anova_data, var.equal = FALSE)
   cat("\nWelch one-way ANOVA for time_of_day:\n"); print(welch_time)
   
-  # Weekend has two groups -> Welch two-sample t-test
+  # Welch two-sample t-test
   welch_weekend <- t.test(money ~ weekend, data = anova_data, var.equal = FALSE)
   cat("\nWelch two-sample test for weekend:\n"); print(welch_weekend)
   
@@ -248,34 +281,81 @@ if (!is.na(lev$p) && lev$p < 0.05) {
   cat("Levene NOT significant -> Standard ANOVA assumptions acceptable; Welch/permutation not required.\n")
 }
 
+## --- 5) Post-hoc for money ~ time_of_day * weekend ---
 
-# 4.3 Estimated cell means with 95% CI (visual) — dodged groups
-cell_stats <- aggregate(money ~ time_of_day + weekend, data = anova_data,
-                        function(z) c(mean = mean(z), sd = sd(z), n = length(z)))
-cell_stats <- do.call(data.frame, cell_stats)
-colnames(cell_stats) <- c("time_of_day","weekend","mean","sd","n")
-cell_stats$se <- cell_stats$sd / sqrt(cell_stats$n)
-cell_stats$ci_half <- qt(0.975, df = pmax(cell_stats$n - 1, 1)) * cell_stats$se
-cell_stats$ci_lo <- cell_stats$mean - cell_stats$ci_half
-cell_stats$ci_hi <- cell_stats$mean + cell_stats$ci_half
+library(dplyr)
+library(rstatix)
+library(readr)
 
-dodge <- position_dodge(width = 0.4)  # controls horizontal separation
+dir.create("tables", showWarnings = FALSE, recursive = TRUE)
 
-p_anova <- ggplot(
-  cell_stats,
-  aes(x = time_of_day, y = mean,
-      group = weekend, color = weekend, shape = weekend, linetype = weekend)
-) +
-  geom_line(position = dodge, linewidth = 0.8) +
-  geom_point(position = dodge, size = 2.8) +
-  # width=0 removes the little horizontal caps so bars don’t cross each other
-  geom_errorbar(aes(ymin = ci_lo, ymax = ci_hi), position = dodge, width = 0) +
-  labs(
-    title = "Estimated means (95% CI): money ~ time_of_day * weekend",
-    x = "Time of day", y = "Mean money"
-  ) +
-  theme_minimal(base_size = 12) +
-  theme(legend.position = "right")
+anova_data <- anova_data %>%
+  dplyr::mutate(
+    time_of_day = as.factor(time_of_day),
+    weekend     = as.factor(weekend)
+  )
 
-ggsave("plots/anova_cell_means.png", p_anova, width = 9, height = 5, dpi = 150)
+cat("\n===== Post-hoc: Simple effects (Games–Howell + Welch) =====\n")
+
+# Within each weekend level: pairwise time_of_day via Games–Howell
+gh_time_within_weekend <-
+  anova_data %>%
+  dplyr::group_by(weekend) %>%
+  rstatix::games_howell_test(money ~ time_of_day) %>%
+
+
+  rstatix::adjust_pvalue(method = "holm") %>%
+  rstatix::add_significance("p.adj") %>%
+  dplyr::ungroup() %>%
+
+  dplyr::select(dplyr::any_of(c(
+    "weekend",".y.","group1","group2","n1","n2",
+    "estimate","conf.low","conf.high",
+    "statistic","t","df","p","p.adj","p.adj.signif"
+  ))) %>%
+  dplyr::arrange(weekend, group1, group2)
+
+cat("\nPairwise time_of_day (Games–Howell, Holm-adjusted) within each weekend level:\n")
+print(gh_time_within_weekend, n = Inf)
+readr::write_csv(gh_time_within_weekend, "tables/posthoc_games_howell_time_within_weekend.csv")
+cat('Saved: tables/posthoc_games_howell_time_within_weekend.csv\n')
+
+# Within each time_of_day level: weekend difference via Welch two-sample t-test
+welch_weekend_within_time <-
+  anova_data %>%
+  dplyr::group_by(time_of_day) %>%
+  rstatix::t_test(money ~ weekend, var.equal = FALSE) %>%
+  rstatix::adjust_pvalue(method = "holm") %>%
+  rstatix::add_significance("p.adj") %>%
+  dplyr::ungroup() %>%
+
+  dplyr::select(dplyr::any_of(c(
+    "time_of_day",".y.","group1","group2","n1","n2",
+    "estimate","estimate1","estimate2",
+    "conf.low","conf.high","statistic","t","df","p","p.adj","p.adj.signif"
+  ))) %>%
+  dplyr::arrange(time_of_day)
+
+cat("\nWeekend effect (Welch t-test, Holm-adjusted) within each time_of_day level:\n")
+print(welch_weekend_within_time, n = Inf)
+readr::write_csv(welch_weekend_within_time, "tables/posthoc_welch_weekend_within_time.csv")
+cat('Saved: tables/posthoc_welch_weekend_within_time.csv\n')
+
+## C) Summaries of significant contrasts
+sig_gh <- dplyr::filter(gh_time_within_weekend, p.adj < 0.05)
+sig_wk <- dplyr::filter(welch_weekend_within_time, p.adj < 0.05)
+
+if (nrow(sig_gh)) {
+  cat("\nSignificant time_of_day contrasts within weekend (Holm):\n")
+  sig_gh %>% dplyr::select(dplyr::any_of(c("weekend","group1","group2","p.adj","p.adj.signif"))) %>% print(n = Inf)
+} else {
+  cat("\nNo Holm-significant time_of_day contrasts within weekend.\n")
+}
+
+if (nrow(sig_wk)) {
+  cat("\nSignificant weekend contrasts within time_of_day (Holm):\n")
+  sig_wk %>% dplyr::select(dplyr::any_of(c("time_of_day","group1","group2","p.adj","p.adj.signif"))) %>% print(n = Inf)
+} else {
+  cat("\nNo Holm-significant weekend contrasts within time_of_day.\n")
+}
 

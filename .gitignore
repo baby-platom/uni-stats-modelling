@@ -48,5 +48,6 @@ po/*~
 # RStudio Connect folder
 rsconnect/
 
-# Analysis files
+# Analysis results
 plots/
+tables/
