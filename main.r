@@ -149,18 +149,133 @@ p2 <- ggplot(heat_dat, aes(x = time_of_day, y = coffee_simple, fill = n)) +
 
 ggsave("plots/heat_counts_coffee_time.png", p2, width = 9, height = 5, dpi = 150)
 
-# 3.4 Visualization 3: Payment method shares by time-of-day and weekend
-pm <- subset(coffee, !is.na(is_cash))
-if (nrow(pm) > 0) {
-  pm$payment <- factor(ifelse(pm$is_cash == 1L, "Cash", "Card"), levels = c("Card","Cash"))
-  p3 <- ggplot(pm, aes(x = time_of_day, fill = payment)) +
-    geom_bar(position = "fill") +
-    facet_wrap(~ weekend) +
-    scale_y_continuous(labels = function(b) paste0(round(b*100), "%")) +
-    labs(title = "Payment Share by Time-of-Day and Weekend",
-         x = "Time of day", y = "Share (%)", fill = "Payment") +
-    theme_minimal(base_size = 12)
-  ggsave("plots/payment_share.png", p3, width = 9, height = 5, dpi = 150)
-} else {
-  cat("\n[Info] Skipped payment share plot: no non-NA values in is_cash.\n")
+#############################################
+# 4) Inferential analysis
+#############################################
+
+fmt_p <- function(p) ifelse(p < 0.001, "< 0.001", sprintf("= %.3f", p))
+
+# 4.1 Two-way ANOVA
+anova_data <- subset(coffee, !is.na(money) & !is.na(time_of_day) & !is.na(weekend))
+
+anova_fit <- aov(money ~ time_of_day * weekend, data = anova_data)
+cat("\n===== Standard Two-way ANOVA: money ~ time_of_day * weekend =====\n"); print(summary(anova_fit))
+
+
+res <- residuals(anova_fit)
+res_shapiro <- try({
+  samp <- if (length(res) > 5000) sample(res, 5000) else res
+  shapiro.test(samp)
+}, silent = TRUE)
+if (!inherits(res_shapiro, "try-error")) {
+  cat("\nShapiro-Wilk on residuals: W =", round(res_shapiro$statistic, 3), ", p ", fmt_p(res_shapiro$p.value), "\n", sep = "")
 }
+
+
+levene_median_test <- function(y, g1, g2) {
+  g <- interaction(g1, g2, drop = TRUE)
+  med <- tapply(y, g, median, na.rm = TRUE)
+  z <- abs(y - med[g])
+  a <- aov(z ~ g)
+  out <- summary(a)[[1]]
+  list(F = out["g","F value"], p = out["g","Pr(>F)"])
+}
+lev <- levene_median_test(anova_data$money, anova_data$time_of_day, anova_data$weekend)
+cat("Levene-type homogeneity test: F = ", round(lev$F, 3), ", p = ", fmt_p(lev$p), "\n", sep = "")
+
+fit <- fitted(anova_fit)
+std_res <- scale(res)[,1]
+
+# Q–Q plot of standardized residuals
+qq_df <- data.frame(std_res = std_res)
+library(ggplot2)
+p_qq <- ggplot(qq_df, aes(sample = std_res)) +
+  stat_qq() +
+  stat_qq_line() +
+  labs(title = "Q–Q plot of standardized residuals",
+       x = "Theoretical quantiles", y = "Standardized residuals") +
+  theme_minimal(base_size = 12)
+
+ggsave("plots/anova_residuals_qq.png", p_qq, width = 7, height = 5, dpi = 150)
+
+# Residuals vs fitted
+rf_df <- data.frame(fit = fit, std_res = std_res)
+p_rv <- ggplot(rf_df, aes(x = fit, y = std_res)) +
+  geom_point(alpha = 0.4) +
+  geom_hline(yintercept = 0, linetype = 2) +
+  labs(title = "Residuals vs Fitted",
+       x = "Fitted values", y = "Standardized residuals") +
+  theme_minimal(base_size = 12)
+
+ggsave("plots/anova_residuals_vs_fitted.png", p_rv, width = 7, height = 5, dpi = 150)
+
+# 4.2 Welch-type tests + permutation for interaction if Levene significant
+cat("\n===== Variance heterogeneity handling =====\n")
+if (!is.na(lev$p) && lev$p < 0.05) {
+  cat("Levene significant -> Using Welch-type tests for main effects and a permutation test for interaction.\n")
+  # Welch one-way for time_of_day (handles unequal variances across dayparts)
+  welch_time <- oneway.test(money ~ time_of_day, data = anova_data, var.equal = FALSE)
+  cat("\nWelch one-way ANOVA for time_of_day:\n"); print(welch_time)
+  
+  # Weekend has two groups -> Welch two-sample t-test
+  welch_weekend <- t.test(money ~ weekend, data = anova_data, var.equal = FALSE)
+  cat("\nWelch two-sample test for weekend:\n"); print(welch_weekend)
+  
+  # Permutation (Freedman–Lane) test for the interaction term
+  perm_int_test <- function(df, B = 5000, seed = 42) {
+    set.seed(seed)
+    full <- lm(money ~ time_of_day * weekend, data = df)
+    red  <- lm(money ~ time_of_day + weekend, data = df)
+    an_cmp <- anova(red, full)
+    F_obs <- as.numeric(an_cmp$F[2])
+    yhat_red <- fitted(red)
+    res_red  <- residuals(red)
+    F_perm <- numeric(B)
+    for (b in seq_len(B)) {
+      y_perm <- yhat_red + sample(res_red, replace = FALSE)
+      full_p <- lm(y_perm ~ time_of_day * weekend, data = df)
+      red_p  <- lm(y_perm ~ time_of_day + weekend, data = df)
+      F_perm[b] <- as.numeric(anova(red_p, full_p)$F[2])
+    }
+    p_perm <- (1 + sum(F_perm >= F_obs, na.rm = TRUE)) / (B + 1)
+    list(F_obs = F_obs, p_perm = p_perm, B = B)
+  }
+  perm_res <- perm_int_test(anova_data, B = 5000)
+  cat(sprintf("\nPermutation test for interaction (Freedman–Lane): F_obs = %.3f, p_perm %s (B = %d)\n",
+              perm_res$F_obs, fmt_p(perm_res$p_perm), perm_res$B))
+  
+} else {
+  cat("Levene NOT significant -> Standard ANOVA assumptions acceptable; Welch/permutation not required.\n")
+}
+
+
+# 4.3 Estimated cell means with 95% CI (visual) — dodged groups
+cell_stats <- aggregate(money ~ time_of_day + weekend, data = anova_data,
+                        function(z) c(mean = mean(z), sd = sd(z), n = length(z)))
+cell_stats <- do.call(data.frame, cell_stats)
+colnames(cell_stats) <- c("time_of_day","weekend","mean","sd","n")
+cell_stats$se <- cell_stats$sd / sqrt(cell_stats$n)
+cell_stats$ci_half <- qt(0.975, df = pmax(cell_stats$n - 1, 1)) * cell_stats$se
+cell_stats$ci_lo <- cell_stats$mean - cell_stats$ci_half
+cell_stats$ci_hi <- cell_stats$mean + cell_stats$ci_half
+
+dodge <- position_dodge(width = 0.4)  # controls horizontal separation
+
+p_anova <- ggplot(
+  cell_stats,
+  aes(x = time_of_day, y = mean,
+      group = weekend, color = weekend, shape = weekend, linetype = weekend)
+) +
+  geom_line(position = dodge, linewidth = 0.8) +
+  geom_point(position = dodge, size = 2.8) +
+  # width=0 removes the little horizontal caps so bars don’t cross each other
+  geom_errorbar(aes(ymin = ci_lo, ymax = ci_hi), position = dodge, width = 0) +
+  labs(
+    title = "Estimated means (95% CI): money ~ time_of_day * weekend",
+    x = "Time of day", y = "Mean money"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "right")
+
+ggsave("plots/anova_cell_means.png", p_anova, width = 9, height = 5, dpi = 150)
+
