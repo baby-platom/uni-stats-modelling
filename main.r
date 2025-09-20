@@ -51,7 +51,7 @@ coffee <- coffee[!duplicated(coffee), ]
 
 stopifnot(all(coffee$money > 0))
 
-# 2.4 Feature engineering: hour, time_of_day, weekend, month
+# 2.4 Feature engineering: hour, time_of_day, weekend
 coffee$hour <- as.integer(format(coffee$datetime, "%H"))
 
 # Time-of-day
@@ -68,9 +68,6 @@ coffee$time_of_day <- cut_td
 wday <- as.POSIXlt(coffee$date)$wday
 coffee$weekend <- factor(ifelse(wday %in% c(0,6), "Weekend", "Weekday"),
                          levels = c("Weekday","Weekend"))
-
-# Month
-coffee$month <- factor(format(coffee$date, "%Y-%m"))
 
 # 2.5 Light outlier flagging
 q1 <- stats::quantile(coffee$money, 0.25, na.rm = TRUE)
@@ -101,7 +98,7 @@ print(aggregate(money ~ weekend, data = coffee, function(z) c(n=length(z), mean=
 cat("\n--- Descriptive by time_of_day ---\n")
 print(aggregate(money ~ time_of_day, data = coffee, function(z) c(n=length(z), mean=mean(z), sd=sd(z), median=median(z))))
 
-# 3.2 Visualization: Boxplot of money by time-of-day, faceted by weekend
+# 3.2 Visualization: Boxplot of money by time-of-day and weekend
 p1 <- ggplot(coffee, aes(x = time_of_day, y = money)) +
   geom_boxplot(outlier.alpha = 0.4) +
   facet_wrap(~ weekend) +
@@ -117,11 +114,9 @@ cat('\nSaved: plots/box_money_time_weekend.png\n')
 #############################################
 
 fmt_p <- function(p) ifelse(p < 0.001, "< 0.001", sprintf("= %.3f", p))
-
-# 4.1 Two-way ANOVA
 anova_data <- subset(coffee, !is.na(money) & !is.na(time_of_day) & !is.na(weekend))
 
-# 4.2 Estimated cell means with 95% CI plot
+# 4.1 Observed means (±95% CI)
 cell_stats <- aggregate(money ~ time_of_day + weekend, data = anova_data,
                         function(z) c(mean = mean(z), sd = sd(z), n = length(z)))
 cell_stats <- do.call(data.frame, cell_stats)
@@ -142,15 +137,16 @@ p_anova <- ggplot(
   geom_point(position = dodge, size = 2.8) +
   geom_errorbar(aes(ymin = ci_lo, ymax = ci_hi), position = dodge, width = 0) +
   labs(
-    title = "Estimated means (95% CI): money ~ time_of_day * weekend",
+    title = "Observed means (±95% CI)",
     x = "Time of day", y = "Mean money"
   ) +
   theme_minimal(base_size = 12) +
   theme(legend.position = "right")
 
-ggsave("plots/anova_cell_means.png", p_anova, width = 9, height = 5, dpi = 150)
+ggsave("plots/cell_means.png", p_anova, width = 9, height = 5, dpi = 150)
 cat('\nSaved: plots/anova_cell_means.png\n')
 
+# 4.2 Two-way ANOVA
 anova_fit <- aov(money ~ time_of_day * weekend, data = anova_data)
 cat("\n===== Standard Two-way ANOVA: money ~ time_of_day * weekend =====\n"); print(summary(anova_fit))
 
@@ -247,8 +243,6 @@ library(dplyr)
 library(rstatix)
 library(readr)
 
-dir.create("tables", showWarnings = FALSE, recursive = TRUE)
-
 anova_data <- anova_data %>%
   dplyr::mutate(
     time_of_day = as.factor(time_of_day),
@@ -277,8 +271,6 @@ gh_time_within_weekend <-
 
 cat("\nPairwise time_of_day (Games–Howell, Holm-adjusted) within each weekend level:\n")
 print(gh_time_within_weekend, n = Inf)
-readr::write_csv(gh_time_within_weekend, "tables/posthoc_games_howell_time_within_weekend.csv")
-cat('Saved: tables/posthoc_games_howell_time_within_weekend.csv\n')
 
 # Within each time_of_day level: weekend difference via Welch two-sample t-test
 welch_weekend_within_time <-
@@ -298,8 +290,6 @@ welch_weekend_within_time <-
 
 cat("\nWeekend effect (Welch t-test, Holm-adjusted) within each time_of_day level:\n")
 print(welch_weekend_within_time, n = Inf)
-readr::write_csv(welch_weekend_within_time, "tables/posthoc_welch_weekend_within_time.csv")
-cat('Saved: tables/posthoc_welch_weekend_within_time.csv\n')
 
 ## C) Summaries of significant contrasts
 sig_gh <- dplyr::filter(gh_time_within_weekend, p.adj < 0.05)
